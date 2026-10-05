@@ -43,10 +43,27 @@ main = do
   assert "paneLayout" (length paneLayouts == 2)
   let overlayPrims = renderOverlay (xAxisTransform 10 0) txY (Rect 0 0 100 200) (PriceLine 10.0 (Color 255 0 0 1.0) 1.0)
   assert "overlay" (length overlayPrims == 1)
+  let hPrims = renderOverlay (xAxisTransform 10 0) txY (Rect 0 0 100 200) (HorizontalStraightLine 50.0 (Color 255 0 0 1.0) 1.0)
+  assert "overlay hLine" (length hPrims == 1)
+  let vPrims = renderOverlay (xAxisTransform 10 0) txY (Rect 0 0 100 200) (VerticalStraightLine 2 (Color 255 0 0 1.0) 1.0)
+  assert "overlay vLine" (length vPrims == 1)
+  let fibPrims = renderOverlay (xAxisTransform 10 0) txY (Rect 0 0 100 200) (FibonacciLine (Point2D 1 100) (Point2D 5 0) (Color 255 0 0 1.0) 1.0)
+  assert "overlay fibonacci" (length fibPrims == 7)
+
   let tip = formatCandleTooltip candle Nothing
   assert "tooltip" (tipClose tip == "12.00")
   assert "kdj" (case kdj 1 3 3 [candle] of [Just _] -> True; _ -> False)
   assert "sar" (case sar 2 2 20 [candle] of [Just _] -> True; _ -> False)
+  let trend = [KLine (fromIntegral i) (10 + fromIntegral i) (12 + fromIntegral i) (9 + fromIntegral i) (11 + fromIntegral i) (Just 10) Nothing | i <- [0 .. 7 :: Int]]
+  assert "dmi warmup" (take 2 (dmi 3 2 trend) == [Nothing, Nothing])
+  assert "dmi values" (case last (dmi 3 2 trend) of Just value -> pdi value > 0 && mdi value == 0 && adx value == Just 100 && adxr value == Just 100; _ -> False)
+  let vrCandles = [candle, candle { timestamp = 2, close = 13 }, candle { timestamp = 3, close = 11 }, candle { timestamp = 4, close = 12 }]
+  assert "vr" (case vr 3 2 vrCandles of [Nothing, Nothing, Just firstVr, Just secondVr] -> vrVal firstVr == 100 && vrVal secondVr == 200 && vrMa secondVr == Just 150; _ -> False)
+  let ichiCandles = [candle { timestamp = fromIntegral i, high = 10 + fromIntegral i, low = 5 + fromIntegral i, close = 8 + fromIntegral i } | i <- [0 .. 15 :: Int]]
+  assert "ichimoku" (case ichimoku 9 9 9 2 ichiCandles of res -> length res == 16)
+  assert "wr" (case wr 2 3 4 [candle, candle { close = 14 }] of [Nothing, Just w] -> wr1 w == Just 0; _ -> False)
+  assert "psy" (case psy 2 2 vrCandles of [Nothing, Nothing, Just p1, Just p2] -> psyValue p1 == Just 50 && psyValue p2 == Just 50 && psyMa p2 == Just 50; _ -> False)
+  assert "bias" (case bias 2 3 4 [candle, candle { close = 14 }] of [Nothing, Just b] -> bias1 b == Just ((14 - 13) / 13 * 100); _ -> False)
   assert "format timestamp" (formatTimestamp 0 == "1970-01-01 00:00")
   assert "overlay edit" (moveOverlayAnchor 0 (Point2D 2 20) (Segment (Point2D 1 10) (Point2D 3 30) (Color 0 0 0 1) 1) == Segment (Point2D 2 20) (Point2D 3 30) (Color 0 0 0 1) 1)
   let dummyCanvas = MonomerCanvas (\_ _ _ _ -> pure ()) (\_ _ -> pure ()) (\_ _ _ -> pure ()) (\_ _ _ _ -> pure ())

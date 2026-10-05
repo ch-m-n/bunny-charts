@@ -5,9 +5,14 @@ module Bunny.Charts.Indicator
   , SAR (..), sar
   , DMI (..), dmi
   , VR (..), vr
+  , Ichimoku (..), ichimoku
+  , WR (..), wr
+  , PSY (..), psy
+  , BIAS (..), bias
   ) where
 
 import Bunny.Charts (KLine (..))
+import Data.List (foldl')
 
 type Series = [Maybe Double]
 
@@ -157,23 +162,212 @@ sar startStep step maxStep xs
                     else (False, nextSar0, min ep (low k), if low k < ep then min afMax (af + afStep) else af)
           in Just (SAR newSar newRising) : go (idx + 1) newRising newSar newEp newAf rest
 
-data DMI = DMI { pdi :: !Double, mdi :: !Double, adx :: !Double } deriving (Eq, Show)
+data DMI = DMI
+  { pdi :: !Double
+  , mdi :: !Double
+  , adx :: !(Maybe Double)
+  , adxr :: !(Maybe Double)
+  } deriving (Eq, Show)
+
+data DMIState = DMIState !Double !Double !Double !Double !Double !Double ![Double] ![Maybe Double]
 
 dmi :: Int -> Int -> [KLine] -> [Maybe DMI]
-dmi period _ xs
-  | not (validPeriod period) = replicate (length xs) Nothing
-  | otherwise =
-      let trs = zipWith calcTR xs (Nothing : map Just xs)
-          calcTR k mPrev = case mPrev of
-            Nothing -> high k - low k
-            Just p -> maximum [high k - low k, abs (high k - close p), abs (low k - close p)]
-          smTR = scanl (+) 0 trs
-      in [ if i < period then Nothing else Just (DMI 20.0 20.0 20.0) | i <- [1 .. length smTR - 1] ]
+dmi period adxrPeriod xs
+  | not (validPeriod period) || not (validPeriod adxrPeriod) = replicate (length xs) Nothing
+  | otherwise = reverse output
+  where
+    DMIState _ _ _ _ _ _ _ output = foldl' step initial (zip3 [0 :: Int ..] xs (Nothing : map Just xs))
+    initial = DMIState 0 0 0 0 0 0 [] []
+    step (DMIState trSum hSum lSum mtr dmp dmm dxs results) (i, k, previous) =
+      DMIState nextTrSum nextHSum nextLSum nextMtr nextDmp nextDmm nextDxs (result : results)
+      where
+        prev = maybe k id previous
+        tr = maximum [high k - low k, abs (high k - close prev), abs (close prev - low k)]
+        highMove = high k - high prev
+        lowMove = low prev - low k
+        dmPlus = if highMove > 0 && highMove > lowMove then highMove else 0
+        dmMinus = if lowMove > 0 && lowMove > highMove then lowMove else 0
+        nextTrSum = trSum + tr
+        nextHSum = hSum + dmPlus
+        nextLSum = lSum + dmMinus
+        ready = i >= period - 1
+        nextMtr
+          | not ready = mtr
+          | i == period - 1 = nextTrSum
+          | otherwise = mtr - mtr / fromIntegral period + tr
+        nextDmp
+          | not ready = dmp
+          | i == period - 1 = nextHSum
+          | otherwise = dmp - dmp / fromIntegral period + dmPlus
+        nextDmm
+          | not ready = dmm
+          | i == period - 1 = nextLSum
+          | otherwise = dmm - dmm / fromIntegral period + dmMinus
+        plus = if nextMtr == 0 then 0 else nextDmp * 100 / nextMtr
+        minus = if nextMtr == 0 then 0 else nextDmm * 100 / nextMtr
+        dx = if plus + minus == 0 then 0 else abs (minus - plus) * 100 / (minus + plus)
+        nextDxs = if ready then dxs ++ [dx] else dxs
+        adxValue
+          | length nextDxs < period = Nothing
+          | length nextDxs == period = Just (sum nextDxs / fromIntegral period)
+          | otherwise = case newestADX results of
+              Just previousADX -> Just ((previousADX * fromIntegral (period - 1) + dx) / fromIntegral period)
+              Nothing -> Nothing
+        adxrValue = do
+          currentADX <- adxValue
+          oldADX <- resultADX (adxrPeriod - 1) results
+          pure ((oldADX + currentADX) / 2)
+        result
+          | not ready = Nothing
+          | otherwise = Just (DMI plus minus adxValue adxrValue)
+
+    newestADX [] = Nothing
+    newestADX (Nothing:rest) = newestADX rest
+    newestADX (Just value:_) = adx value
+    resultADX offset results = case drop offset results of
+      Just value:_ -> adx value
+      _ -> Nothing
 
 data VR = VR { vrVal :: !Double, vrMa :: !(Maybe Double) } deriving (Eq, Show)
 
 vr :: Int -> Int -> [KLine] -> [Maybe VR]
-vr p1 _ xs
-  | not (validPeriod p1) = replicate (length xs) Nothing
+vr period maPeriod xs
+  | not (validPeriod period) || not (validPeriod maPeriod) = replicate (length xs) Nothing
+  | otherwise = zipWith make [0 :: Int ..] windows
+  where
+    classified = zipWith classify xs (Nothing : map Just xs)
+    classify k previous
+      | close k > close prev = (vol, 0, 0)
+      | close k < close prev = (0, vol, 0)
+      | otherwise = (0, 0, vol)
+      where
+        prev = maybe k id previous
+        vol = maybe 0 id (volume k)
+    windows = [take period (drop (max 0 (i - period + 1)) classified) | i <- [0 .. length xs - 1]]
+    ratios = zipWith ratio [0 :: Int ..] windows
+    ratio i values
+      | i < period - 1 = Nothing
+      | denominator == 0 = Just 0
+      | otherwise = Just ((up + flat / 2) * 100 / denominator)
+      where
+        (up, down, flat) = foldl' (\(a, b, c) (x, y, z) -> (a + x, b + y, c + z)) (0, 0, 0) values
+        denominator = down + flat / 2
+    make i _ = case ratios !! i of
+      Nothing -> Nothing
+      Just value -> Just (VR value movingAverage)
+      where
+        available = [v | Just v <- take maPeriod (drop (max 0 (i - maPeriod + 1)) ratios)]
+        movingAverage
+          | length available < maPeriod = Nothing
+          | otherwise = Just (sum available / fromIntegral maPeriod)
+
+data Ichimoku = Ichimoku
+  { tenkan :: !(Maybe Double)
+  , kijun :: !(Maybe Double)
+  , senkouA :: !(Maybe Double)
+  , senkouB :: !(Maybe Double)
+  , chikou :: !(Maybe Double)
+  } deriving (Eq, Show)
+
+ichimoku :: Int -> Int -> Int -> Int -> [KLine] -> [Maybe Ichimoku]
+ichimoku tenkanP kijunP senkouP displacement xs
+  | any (not . validPeriod) [tenkanP, kijunP, senkouP, displacement] = replicate (length xs) Nothing
   | otherwise =
-      [ if i < p1 then Nothing else Just (VR 100.0 Nothing) | i <- [1 .. length xs] ]
+      let n = length xs
+          midpoint p i
+            | i < p - 1 = Nothing
+            | otherwise =
+                let window = take p (drop (i - p + 1) xs)
+                    hi = maximum (map high window)
+                    lo = minimum (map low window)
+                in Just ((hi + lo) / 2)
+          tenkans = [midpoint tenkanP i | i <- [0 .. n - 1]]
+          kijuns  = [midpoint kijunP i | i <- [0 .. n - 1]]
+          senkouBs = [if i >= displacement then midpoint senkouP (i - displacement) else Nothing | i <- [0 .. n - 1]]
+          senkouAs =
+            [ if i < displacement then Nothing
+              else case (tenkans !! (i - displacement), kijuns !! (i - displacement)) of
+                     (Just t, Just k) -> Just ((t + k) / 2)
+                     _ -> Nothing
+            | i <- [0 .. n - 1]
+            ]
+          chikous =
+            [ if i + displacement < n
+              then Just (close (xs !! (i + displacement)))
+              else Nothing
+            | i <- [0 .. n - 1]
+            ]
+      in [ Just (Ichimoku t k sa sb ch)
+         | (t, k, sa, sb, ch) <- zip5 tenkans kijuns senkouAs senkouBs chikous
+         ]
+
+data WR = WR
+  { wr1 :: !(Maybe Double)
+  , wr2 :: !(Maybe Double)
+  , wr3 :: !(Maybe Double)
+  } deriving (Eq, Show)
+
+wr :: Int -> Int -> Int -> [KLine] -> [Maybe WR]
+wr p1 p2 p3 xs
+  | any (not . validPeriod) [p1, p2, p3] = replicate (length xs) Nothing
+  | otherwise =
+      let n = length xs
+          calcP p i
+            | i < p - 1 = Nothing
+            | otherwise =
+                let window = take p (drop (i - p + 1) xs)
+                    hn = maximum (map high window)
+                    ln = minimum (map low window)
+                    c = close (xs !! i)
+                in if hn == ln then Just 0 else Just (((c - hn) / (hn - ln)) * 100)
+          wr1s = [calcP p1 i | i <- [0 .. n - 1]]
+          wr2s = [calcP p2 i | i <- [0 .. n - 1]]
+          wr3s = [calcP p3 i | i <- [0 .. n - 1]]
+      in [ Just (WR w1 w2 w3) | (w1, w2, w3) <- zip3 wr1s wr2s wr3s ]
+
+data PSY = PSY
+  { psyValue :: !(Maybe Double)
+  , psyMa :: !(Maybe Double)
+  } deriving (Eq, Show)
+
+psy :: Int -> Int -> [KLine] -> [Maybe PSY]
+psy period maPeriod xs
+  | not (validPeriod period) || not (validPeriod maPeriod) = replicate (length xs) Nothing
+  | otherwise =
+      let n = length xs
+          ups = [ if i == 0 then (0 :: Int) else if close (xs !! i) > close (xs !! (i - 1)) then 1 else 0 | i <- [0 .. n - 1] ]
+          psyVal i
+            | i < period = Nothing
+            | otherwise =
+                let window = take period (drop (i - period + 1) ups)
+                in Just (fromIntegral (sum window) * 100 / fromIntegral period)
+          psyVals = [psyVal i | i <- [0 .. n - 1]]
+          maVal i
+            | i < period + maPeriod - 1 = Nothing
+            | otherwise =
+                let window = [v | Just v <- take maPeriod (drop (i - maPeriod + 1) psyVals)]
+                in if length window == maPeriod then Just (sum window / fromIntegral maPeriod) else Nothing
+      in [ Just (PSY pv mv) | (pv, mv) <- zip psyVals [maVal i | i <- [0 .. n - 1]] ]
+
+data BIAS = BIAS
+  { bias1 :: !(Maybe Double)
+  , bias2 :: !(Maybe Double)
+  , bias3 :: !(Maybe Double)
+  } deriving (Eq, Show)
+
+bias :: Int -> Int -> Int -> [KLine] -> [Maybe BIAS]
+bias p1 p2 p3 xs
+  | any (not . validPeriod) [p1, p2, p3] = replicate (length xs) Nothing
+  | otherwise =
+      let n = length xs
+          calcB p i
+            | i < p - 1 = Nothing
+            | otherwise =
+                let window = take p (drop (i - p + 1) xs)
+                    mean = sum (map close window) / fromIntegral p
+                    c = close (xs !! i)
+                in if mean == 0 then Nothing else Just (((c - mean) / mean) * 100)
+          b1s = [calcB p1 i | i <- [0 .. n - 1]]
+          b2s = [calcB p2 i | i <- [0 .. n - 1]]
+          b3s = [calcB p3 i | i <- [0 .. n - 1]]
+      in [ Just (BIAS b1 b2 b3) | (b1, b2, b3) <- zip3 b1s b2s b3s ]
