@@ -9,10 +9,13 @@ module Bunny.Charts.Indicator
   , WR (..), wr
   , PSY (..), psy
   , BIAS (..), bias
+  , AVP (..), avp, AO (..), ao, BBI (..), bbi, BRAR (..), brar
+  , CCI (..), cci, CR (..), cr, DMA (..), dma, EMV (..), emv
+  , MTM (..), mtm, PVT (..), pvt, ROC (..), roc, TRIX (..), trix
   ) where
 
 import Bunny.Charts (KLine (..))
-import Data.List (foldl')
+import Data.List (zip5)
 
 type Series = [Maybe Double]
 
@@ -169,7 +172,7 @@ data DMI = DMI
   , adxr :: !(Maybe Double)
   } deriving (Eq, Show)
 
-data DMIState = DMIState !Double !Double !Double !Double !Double !Double ![Double] ![Maybe Double]
+data DMIState = DMIState !Double !Double !Double !Double !Double !Double ![Double] ![Maybe DMI]
 
 dmi :: Int -> Int -> [KLine] -> [Maybe DMI]
 dmi period adxrPeriod xs
@@ -371,3 +374,200 @@ bias p1 p2 p3 xs
           b2s = [calcB p2 i | i <- [0 .. n - 1]]
           b3s = [calcB p3 i | i <- [0 .. n - 1]]
       in [ Just (BIAS b1 b2 b3) | (b1, b2, b3) <- zip3 b1s b2s b3s ]
+
+data AVP = AVP { avpValue :: !(Maybe Double) } deriving (Eq, Show)
+
+avp :: [KLine] -> [AVP]
+avp xs = reverse output
+  where
+    (_, _, output) = foldl' step (0, 0, []) xs
+    step (turnoverSum, volumeSum, values) k =
+      let vol = max 0 (maybe 0 id (volume k))
+          price = (high k + low k + close k) / 3
+          turnoverValue = maybe (price * vol) id (turnover k)
+          nextVolume = volumeSum + vol
+          value = if nextVolume == 0 then Nothing else Just ((turnoverSum + turnoverValue) / nextVolume)
+      in (turnoverSum + turnoverValue, nextVolume, AVP value : values)
+
+data AO = AO { aoValue :: !(Maybe Double) } deriving (Eq, Show)
+
+ao :: Int -> Int -> [KLine] -> [AO]
+ao shortPeriod longPeriod xs
+  | any (not . validPeriod) [shortPeriod, longPeriod] = replicate (length xs) (AO Nothing)
+  | otherwise =
+      let n = length xs
+          middle k = (high k + low k) / 2
+          average p i
+            | i < p - 1 = Nothing
+            | otherwise = Just (sum (map middle (take p (drop (i - p + 1) xs))) / fromIntegral p)
+      in [AO (do short <- average shortPeriod i; long <- average longPeriod i; pure (short - long)) | i <- [0 .. n - 1]]
+
+data BBI = BBI { bbiValue :: !(Maybe Double) } deriving (Eq, Show)
+
+bbi :: Int -> Int -> Int -> Int -> [KLine] -> [BBI]
+bbi p1 p2 p3 p4 xs
+  | any (not . validPeriod) [p1, p2, p3, p4] = replicate (length xs) (BBI Nothing)
+  | otherwise = [BBI (meanAt i) | i <- [0 .. length xs - 1]]
+  where
+    periods = [p1, p2, p3, p4]
+    mean p i
+      | i < p - 1 = Nothing
+      | otherwise = Just (sum (map close (take p (drop (i - p + 1) xs))) / fromIntegral p)
+    meanAt i = do
+      values <- sequence [mean p i | p <- periods]
+      pure (sum values / fromIntegral (length values))
+
+data BRAR = BRAR { brValue :: !(Maybe Double), arValue :: !(Maybe Double) } deriving (Eq, Show)
+
+brar :: Int -> [KLine] -> [BRAR]
+brar period xs
+  | not (validPeriod period) = replicate (length xs) (BRAR Nothing Nothing)
+  | otherwise = [calculate i | i <- [0 .. length xs - 1]]
+  where
+    calculate i
+      | i < period - 1 = BRAR Nothing Nothing
+      | otherwise =
+          let window = take period (drop (i - period + 1) xs)
+              prevs = Nothing : map Just (take (length window - 1) window)
+              hcy = sum [high k - close (maybe k id prev) | (k, prev) <- zip window prevs]
+              cyl = sum [close (maybe k id prev) - low k | (k, prev) <- zip window prevs]
+              ho = sum [high k - open k | k <- window]
+              ol = sum [open k - low k | k <- window]
+          in BRAR (Just (if cyl == 0 then 0 else hcy * 100 / cyl)) (Just (if ol == 0 then 0 else ho * 100 / ol))
+
+data CCI = CCI { cciValue :: !(Maybe Double) } deriving (Eq, Show)
+
+cci :: Int -> [KLine] -> [CCI]
+cci period xs
+  | not (validPeriod period) = replicate (length xs) (CCI Nothing)
+  | otherwise = [calculate i | i <- [0 .. length xs - 1]]
+  where
+    typical k = (high k + low k + close k) / 3
+    calculate i
+      | i < period - 1 = CCI Nothing
+      | otherwise =
+          let values = map typical (take period (drop (i - period + 1) xs))
+              mean = sum values / fromIntegral period
+              deviation = sum (map (abs . subtract mean) values) / fromIntegral period
+              current = typical (xs !! i)
+          in CCI (Just (if deviation == 0 then 0 else (current - mean) / deviation / 0.015))
+
+data CR = CR { crValue :: !(Maybe Double), crMa1 :: !(Maybe Double), crMa2 :: !(Maybe Double), crMa3 :: !(Maybe Double), crMa4 :: !(Maybe Double) } deriving (Eq, Show)
+
+cr :: Int -> [Int] -> [KLine] -> [CR]
+cr period maPeriods xs
+  | not (validPeriod period) || any (not . validPeriod) maPeriods = replicate (length xs) empty
+  | otherwise = zipWith make [0 ..] raw
+  where
+    empty = CR Nothing Nothing Nothing Nothing Nothing
+    raw = [valueAt i | i <- [0 .. length xs - 1]]
+    valueAt i
+      | i < period = Nothing
+      | otherwise =
+          let indices = [i - period + 1 .. i]
+              pair j = (xs !! j, xs !! (j - 1))
+              ups = sum [max 0 (high k - (high previous + low previous) / 2) | j <- indices, let (k, previous) = pair j]
+              downs = sum [max 0 ((high previous + low previous) / 2 - low k) | j <- indices, let (k, previous) = pair j]
+          in Just (if downs == 0 then 0 else ups * 100 / downs)
+    moving p i =
+      let shift = ceiling (fromIntegral p / 2.5 + 1 :: Double)
+          end = i - shift
+          values = [v | Just v <- take p (drop (end - p + 1) raw)]
+      in if end >= p - 1 && length values == p then Just (sum values / fromIntegral p) else Nothing
+    at n i = if n < length maPeriods then moving (maPeriods !! n) i else Nothing
+    make i value = CR value (at 0 i) (at 1 i) (at 2 i) (at 3 i)
+
+data DMA = DMA { dmaValue :: !(Maybe Double), amaValue :: !(Maybe Double) } deriving (Eq, Show)
+
+dma :: Int -> Int -> Int -> [KLine] -> [DMA]
+dma shortPeriod longPeriod signalPeriod xs
+  | any (not . validPeriod) [shortPeriod, longPeriod, signalPeriod] = replicate (length xs) (DMA Nothing Nothing)
+  | otherwise = [DMA value (signal i) | (i, value) <- zip [0 ..] values]
+  where
+    average p i
+      | i < p - 1 = Nothing
+      | otherwise = Just (sum (map close (take p (drop (i - p + 1) xs))) / fromIntegral p)
+    values = [do a <- average shortPeriod i; b <- average longPeriod i; pure (a - b) | i <- [0 .. length xs - 1]]
+    signal i = let values' = [v | Just v <- take signalPeriod (drop (i - signalPeriod + 1) values)]
+               in if length values' == signalPeriod then Just (sum values' / fromIntegral signalPeriod) else Nothing
+
+data EMV = EMV { emvValue :: !(Maybe Double), emvMa :: !(Maybe Double) } deriving (Eq, Show)
+
+emv :: Int -> Int -> [KLine] -> [EMV]
+emv period signalPeriod xs
+  | any (not . validPeriod) [period, signalPeriod] = replicate (length xs) (EMV Nothing Nothing)
+  | otherwise = [EMV (at i) (signal i) | i <- [0 .. length xs - 1]]
+  where
+    raw i
+      | i == 0 = Nothing
+      | volume (xs !! i) <= Just 0 = Nothing
+      | high k == low k = Nothing
+      | otherwise = Just (((((high k + low k) - high previous - low previous) / 2) * (high k - low k) / maybe 1 id (volume k)) * 100000000)
+      where k = xs !! i; previous = xs !! (i - 1)
+    at i = let values = [v | Just v <- take period (drop (i - period + 1) (map raw [0 .. length xs - 1]))]
+           in if length values == period then Just (sum values / fromIntegral period) else Nothing
+    series = [at i | i <- [0 .. length xs - 1]]
+    signal i = let values = [v | Just v <- take signalPeriod (drop (i - signalPeriod + 1) series)]
+               in if length values == signalPeriod then Just (sum values / fromIntegral signalPeriod) else Nothing
+
+data MTM = MTM { mtmValue :: !(Maybe Double), mtmMa :: !(Maybe Double) } deriving (Eq, Show)
+
+mtm :: Int -> Int -> [KLine] -> [MTM]
+mtm period signalPeriod xs
+  | any (not . validPeriod) [period, signalPeriod] = replicate (length xs) (MTM Nothing Nothing)
+  | otherwise = [MTM value (signal i) | (i, value) <- zip [0 ..] values]
+  where
+    values = [if i < period then Nothing else Just (close (xs !! i) - close (xs !! (i - period))) | i <- [0 .. length xs - 1]]
+    signal i = let values' = [v | Just v <- take signalPeriod (drop (i - signalPeriod + 1) values)]
+               in if length values' == signalPeriod then Just (sum values' / fromIntegral signalPeriod) else Nothing
+
+data PVT = PVT { pvtValue :: !Double } deriving (Eq, Show)
+
+pvt :: [KLine] -> [PVT]
+pvt xs = reverse output
+  where
+    (_, output) = foldl' step (Nothing, []) xs
+    step (previous, values) k =
+      let total = case (previous, values) of
+            (Just prior, PVT running:_) | prior /= 0 -> running + ((close k - prior) / prior) * maybe 0 id (volume k)
+            _ -> 0
+      in (Just (close k), PVT total : values)
+
+data ROC = ROC { rocValue :: !(Maybe Double), rocMa :: !(Maybe Double) } deriving (Eq, Show)
+
+roc :: Int -> Int -> [KLine] -> [ROC]
+roc period signalPeriod xs
+  | any (not . validPeriod) [period, signalPeriod] = replicate (length xs) (ROC Nothing Nothing)
+  | otherwise = [ROC value (signal i) | (i, value) <- zip [0 ..] values]
+  where
+    values = [if i < period then Nothing else let old = close (xs !! (i - period)) in Just (if old == 0 then 0 else (close (xs !! i) - old) * 100 / old) | i <- [0 .. length xs - 1]]
+    signal i = let values' = [v | Just v <- take signalPeriod (drop (i - signalPeriod + 1) values)]
+               in if length values' == signalPeriod then Just (sum values' / fromIntegral signalPeriod) else Nothing
+
+data TRIX = TRIX { trixValue :: !(Maybe Double), trixMa :: !(Maybe Double) } deriving (Eq, Show)
+
+trix :: Int -> Int -> [KLine] -> [TRIX]
+trix period signalPeriod xs
+  | any (not . validPeriod) [period, signalPeriod] = replicate (length xs) (TRIX Nothing Nothing)
+  | otherwise = [TRIX value (signal i) | (i, value) <- zip [0 ..] values]
+  where
+    emaSeries p input = go 0 Nothing input
+      where
+        alpha = 2 / fromIntegral (p + 1)
+        go _ _ [] = []
+        go total previous (x:rest)
+          | count < p = Nothing : go (total + x) Nothing rest
+          | count == p = Just initial : go (total + x) (Just initial) rest
+          | otherwise = Just next : go (total + x) (Just next) rest
+          where
+            count = length input - length rest
+            initial = (total + x) / fromIntegral p
+            next = alpha * x + (1 - alpha) * maybe initial id previous
+    e1 = emaSeries period (map close xs)
+    e2 = emaSeries period [maybe 0 id v | v <- e1]
+    e3 = emaSeries period [maybe 0 id v | v <- e2]
+    values = zipWith previousChange (Nothing : e3) e3
+    previousChange (Just previous) (Just current) | previous /= 0 = Just ((current - previous) * 100 / previous)
+    previousChange _ _ = Nothing
+    signal i = let values' = [v | Just v <- take signalPeriod (drop (i - signalPeriod + 1) values)]
+               in if length values' == signalPeriod then Just (sum values' / fromIntegral signalPeriod) else Nothing
