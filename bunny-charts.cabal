@@ -1,0 +1,34 @@
+cabal-version:      3.0
+name:               bunny-charts
+version:            0.1.0.0
+synopsis:           UI-toolkit-neutral K-line chart engine
+category:           Graphics
+license:            MIT
+license-file:       LICENSE
+build-type:         Simple
+
+library
+  exposed-modules:
+      Bunny.Charts
+    , Bunny.Charts.Indicator
+    , Bunny.Charts.Geometry
+    , Bunny.Charts.Render
+    , Bunny.Charts.Interaction
+    , Bunny.Charts.Axis
+    , Bunny.Charts.Overlay
+    , Bunny.Charts.Pane
+    , Bunny.Charts.Tooltip
+    , Bunny.Charts.Format
+    , Bunny.Charts.Monomer
+    , Bunny.Charts.Backend
+  hs-source-dirs:      src
+  default-language:    GHC2024
+  ghc-options:         -Wall
+  build-depends:       base >= 4.18 && < 5
+
+executable bunny-charts-check
+  main-is:             Check.hs
+  hs-source-dirs:      test
+  default-language:    GHC2024
+  ghc-options:         -Wall
+  build-depends:       base >= 4.18 && < 5, bunny-charts
